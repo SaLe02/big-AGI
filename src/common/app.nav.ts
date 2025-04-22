@@ -101,6 +101,7 @@ export const navItems: {
       hideDrawer: true,
       panelAsMenu: true,
       fullWidth: true,
+      _delete: true,
     },
     // {
     //   name: 'Draw',
@@ -181,6 +182,7 @@ export const navItems: {
       hideDrawer: true,
       hideIcon: true,
       isDev: true,
+      _delete: true
     },
     {
       name: 'Media Library',
@@ -239,18 +241,18 @@ export const navItems: {
     //   icon: TwitterIcon,
     //   href: 'https://twitter.com',
     // },
-    {
-      type: 'extLink',
-      name: 'Discord',
-      icon: DiscordIcon,
-      href: Brand.URIs.SupportInvite,
-    },
-    {
-      type: 'extLink',
-      name: 'GitHub',
-      icon: GitHubIcon,
-      href: Brand.URIs.OpenRepo,
-    },
+    //{
+    //  type: 'extLink',
+    //  name: 'Discord',
+    //  icon: DiscordIcon,
+    //  href: Brand.URIs.SupportInvite,
+   // },
+  //  {
+  //    type: 'extLink',
+  //    name: 'GitHub',
+  //    icon: GitHubIcon,
+  //    href: Brand.URIs.OpenRepo,
+  //  },
   ],
 
 };
