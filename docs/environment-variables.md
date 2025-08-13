@@ -56,8 +56,6 @@ GOOGLE_CSE_ID=
 ELEVENLABS_API_KEY=
 ELEVENLABS_API_HOST=
 ELEVENLABS_VOICE_ID=
-# Text-To-Image: Prodia
-PRODIA_API_KEY=
 
 # Backend HTTP Basic Authentication (see `deploy-authentication.md` for turning on authentication)
 HTTP_BASIC_AUTH_USERNAME=
@@ -133,8 +131,6 @@ Enable the app to Talk, Draw, and Google things up.
 | `ELEVENLABS_API_KEY`       | ElevenLabs API Key - used for calls, etc.                                                                               |
 | `ELEVENLABS_API_HOST`      | Custom host for ElevenLabs                                                                                              |
 | `ELEVENLABS_VOICE_ID`      | Default voice ID for ElevenLabs                                                                                         |
-| **Text-To-Image**          | [Prodia](https://prodia.com/) is a reliable image generation service                                                    |
-| `PRODIA_API_KEY`           | Prodia API Key - used with '/imagine ...'                                                                               |
 | **Google Custom Search**   | [Google Programmable Search Engine](https://programmablesearchengine.google.com/about/)  produces links to pages        |
 | `GOOGLE_CLOUD_API_KEY`     | Google Cloud API Key, used with the '/react' command - [Link to GCP](https://console.cloud.google.com/apis/credentials) |
 | `GOOGLE_CSE_ID`            | Google Custom/Programmable Search Engine ID - [Link to PSE](https://programmablesearchengine.google.com/)               |
@@ -150,6 +146,7 @@ The value of these variables are passed to the frontend (Web UI) - make sure the
 
 | Variable                          | Description                                                                                                                                                                                                                                     |
 |:----------------------------------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `NEXT_PUBLIC_DEBUG_BREAKS`        | (optional, development) When set to 'true', enables automatic debugger breaks on DEV/error/critical logs in development builds                                                                                                                  |
 | `NEXT_PUBLIC_MOTD`                | Message of the Day - displays a dismissible banner at the top of the app (see [customizations](customizations.md) for the template variables). Example: 🔔 Welcome to our deployment! Version {{app_build_pkgver}} built on {{app_build_time}}. |
 | `NEXT_PUBLIC_GA4_MEASUREMENT_ID`  | (optional) The measurement ID for Google Analytics 4. (see [deploy-analytics](deploy-analytics.md))                                                                                                                                             |
 | `NEXT_PUBLIC_POSTHOG_KEY`         | (optional) Key for PostHog analytics. (see [deploy-analytics](deploy-analytics.md))                                                                                                                                                             |

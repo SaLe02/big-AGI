@@ -3,7 +3,7 @@
 import * as React from 'react';
 import { fileOpen, fileSave, FileWithHandle } from 'browser-fs-access';
 
-import { Box, Button, Divider, FormControl, FormLabel, Sheet, Switch, Typography } from '@mui/joy';
+import { Box, Button, Checkbox, Divider, FormControl, FormLabel, Sheet, Switch, Typography } from '@mui/joy';
 import DownloadIcon from '@mui/icons-material/Download';
 import DoneIcon from '@mui/icons-material/Done';
 import ErrorIcon from '@mui/icons-material/Error';
@@ -36,8 +36,8 @@ const INCLUDED_IDB_KEYS: { [dbName: string]: { [storeName: string]: string[]; };
 // Flashing Backup Schema
 // NOTE: ABSOLUTELY NOT CHANGE WITHOUT CHANGING THE saveFlashObjectOrThrow_Streaming TOO (!)
 interface DFlashSchema {
-  _t: 'agi.flash-backup';
-  _v: number;
+  schema: 'vnd.agi.flash-backup';
+  schemaVersion: number;
   metadata: {
     version: string;
     timestamp: string;
@@ -247,6 +247,13 @@ function getIndexedDBContent(dbName: string): Promise<Record<string, { key: any;
 
 async function restoreLocalStorage(data: Record<string, any>): Promise<void> {
   try {
+    // Skip restoration if backup contains no localStorage data
+    const hasData = Object.keys(data).length > 0;
+    if (!hasData) {
+      logger.info('Skipping localStorage restore - backup contains no localStorage data');
+      return;
+    }
+
     localStorage.clear();
     for (const key in data) {
       try {
@@ -262,14 +269,66 @@ async function restoreLocalStorage(data: Record<string, any>): Promise<void> {
 }
 
 async function restoreIndexedDB(allDbData: Record<string, any>): Promise<void> {
+  // expected local DBs to restore over, from the latest `v2-dev` (2025-05-14)
+  const dbTargetVersions: { [dbName: string]: number } = {
+    'keyval-store': 1,
+    'Big-AGI': 10, // Dexie multiplied the version (1) by 10 (https://github.com/dexie/Dexie.js/issues/59)
+  };
+
   // process each database in sequence
   for (const dbName in allDbData) {
     try {
       const dbStoresData = allDbData[dbName] as Record<string, { key: any; value: any }[]>;
+      const dbStoreNames = Object.keys(dbStoresData);
+      const dbStoreVersion = dbTargetVersions[dbName] || 1;
 
       await new Promise<void>((resolve, reject) => {
         try {
-          const openRequest = window.indexedDB.open(dbName);
+          const openRequest = window.indexedDB.open(dbName, dbStoreVersion);
+
+          // If the DB was not there, it means we're loading the flash over the new architecture (ZYNC). In this case, we need to recreate
+          // the stores inside this new DB first.
+          openRequest.onupgradeneeded = (event) => {
+            const db = (event.target as IDBOpenDBRequest).result;
+            logger.debug(`onupgradeneeded triggered for DB "${dbName}" (oldVersion: ${event.oldVersion}, newVersion: ${event.newVersion})`);
+
+            // Create object stores based on the database name
+            if (dbName === 'keyval-store') {
+              // Create the keyval object store if it doesn't exist
+              if (!db.objectStoreNames.contains('keyval')) {
+                db.createObjectStore('keyval');
+                logger.info(`Created keyval object store in keyval-store database`);
+              }
+            } else if (dbName === 'Big-AGI') {
+              // Create the largeAssets object store with all its indices if it doesn't exist
+              if (!db.objectStoreNames.contains('largeAssets')) {
+                const largeAssetsStore = db.createObjectStore('largeAssets', { keyPath: 'id' });
+                // Create all the indices as defined in dblobs.db.ts
+                // Index common properties (and compound indexes)
+                largeAssetsStore.createIndex('[contextId+scopeId]', ['contextId', 'scopeId']);
+                largeAssetsStore.createIndex('assetType', 'assetType');
+                largeAssetsStore.createIndex('[assetType+contextId+scopeId]', ['assetType', 'contextId', 'scopeId']);
+                largeAssetsStore.createIndex('data.mimeType', 'data.mimeType');
+                largeAssetsStore.createIndex('origin.ot', 'origin.ot');
+                largeAssetsStore.createIndex('origin.source', 'origin.source');
+                largeAssetsStore.createIndex('createdAt', 'createdAt');
+                largeAssetsStore.createIndex('updatedAt', 'updatedAt');
+                logger.info(`Created largeAssets object store with all indices in Big-AGI database`);
+              }
+            } else {
+              // For any unknown database, try to create the object stores that are in the backup
+              for (const storeName of dbStoreNames) {
+                if (!db.objectStoreNames.contains(storeName)) {
+                  logger.warn(`Creating object store "${storeName}" in unknown DB "${dbName}" without schema`);
+                  try {
+                    db.createObjectStore(storeName);
+                  } catch (error) {
+                    logger.error(`Failed to create object store "${storeName}" in DB "${dbName}":`, error);
+                  }
+                }
+              }
+            }
+          };
 
           openRequest.onerror = (event) => {
             const target = event.target as IDBOpenDBRequest;
@@ -280,11 +339,11 @@ async function restoreIndexedDB(allDbData: Record<string, any>): Promise<void> {
           openRequest.onsuccess = (event) => {
             const db = (event.target as IDBOpenDBRequest).result;
             const existingStoreNames = Array.from(db.objectStoreNames);
-            const storesToRestore = Object.keys(dbStoresData)
-              .filter(name => existingStoreNames.includes(name));
+            const storesToRestore = dbStoreNames.filter(name => existingStoreNames.includes(name));
 
+            if (storesToRestore.length < dbStoreNames.length)
+              logger.error(`No matching stores found in ${dbName}, expected '${dbStoreNames.join(', ')}' but found '${existingStoreNames.join(', ')}'`);
             if (storesToRestore.length === 0) {
-              logger.warn(`No matching stores found in ${dbName}, skipping`);
               db.close();
               resolve();
               return;
@@ -308,7 +367,7 @@ async function restoreIndexedDB(allDbData: Record<string, any>): Promise<void> {
                 if (transactionFailed) {
                   logger.warn(`Transaction for "${dbName}" completed with some errors. Restore may be incomplete.`);
                 } else {
-                  logger.info(`Successfully restored database: ${dbName}`);
+                  logger.warn(`Successfully restored database: ${dbName}`);
                 }
                 resolve();
               };
@@ -336,14 +395,23 @@ async function restoreIndexedDB(allDbData: Record<string, any>): Promise<void> {
                       // Handle possible cases:
                       // 1. Store with keyPath - add value directly
                       // 2. Store without keyPath - add value with explicit key
-                      const request = store.keyPath !== null
-                        ? store.add(item.value)
-                        : store.add(item.value, item.key);
+                      let request: IDBRequest;
+
+                      // Special handling for keyval-store which has no keyPath
+                      if (dbName === 'keyval-store' && storeName === 'keyval') {
+                        request = store.add(item.value, item.key);
+                      } else if (store.keyPath !== null) {
+                        // Store has a keyPath, add value directly
+                        request = store.add(item.value);
+                      } else {
+                        // Store has no keyPath, add with explicit key
+                        request = store.add(item.value, item.key);
+                      }
 
                       request.onsuccess = () => {
                         itemsProcessed++;
                         if (itemsProcessed === items.length) {
-                          // logger.debug(`Restored ${items.length} items to store "${storeName}"`);
+                          logger.info(`Restored ${items.length} items to store "${storeName}" in "${dbName}"`);
                           completedStores++;
 
                           // Process next store
@@ -352,13 +420,14 @@ async function restoreIndexedDB(allDbData: Record<string, any>): Promise<void> {
                       };
 
                       request.onerror = (event) => {
+                        const error = (event.target as IDBRequest).error;
                         logger.error(`Error adding item to "${storeName}" in "${dbName}" (Key: ${
                           typeof item.key === 'object' ? JSON.stringify(item.key) : item.key
-                        }): ${(event.target as IDBRequest).error?.message || 'Unknown error'}`);
+                        }): ${error?.message || 'Unknown error'}`);
 
                         itemsProcessed++;
                         if (itemsProcessed === items.length) {
-                          // logger.debug(`Restored ${items.length} items to store "${storeName}" with some errors`);
+                          logger.warn(`Restored ${items.length} items to store "${storeName}" with some errors`);
                           completedStores++;
 
                           // Process next store
@@ -436,11 +505,11 @@ function isValidBackup(data: any): data is DFlashSchema {
 /**
  * Creates a backup object and optionally saves it to a file
  */
-async function saveFlashObjectOrThrow(backupType: 'full' | 'auto-before-restore', forceDownloadOverFileSave: boolean, ignoreExclusions: boolean, saveToFileName: string) {
+async function saveFlashObjectOrThrow(backupType: 'full' | 'auto-before-restore', forceDownloadOverFileSave: boolean, ignoreExclusions: boolean, includeSettings: boolean, saveToFileName: string) {
 
   // for mobile, try with the download link approach - we keep getting truncated JSON save-files in other paths, streaming or not
   if (forceDownloadOverFileSave || !Is.Desktop)
-    return createFlashObject(backupType, ignoreExclusions)
+    return createFlashObject(backupType, ignoreExclusions, includeSettings)
       .then(JSON.stringify)
       .then((flashString) => {
         logger.info(`Expected flash file size: ${flashString.length.toLocaleString()} bytes`);
@@ -455,7 +524,7 @@ async function saveFlashObjectOrThrow(backupType: 'full' | 'auto-before-restore'
   // run after the file picker has confirmed a file
   const flashBlobPromise = new Promise<Blob>(async (resolve) => {
     // create the backup object (heavy operation)
-    const flashObject = await createFlashObject(backupType, ignoreExclusions);
+    const flashObject = await createFlashObject(backupType, ignoreExclusions, includeSettings);
 
     // WARNING: on Mobile, the JSON serialization could fail silently - we disable pretty-print to conserve space
     const flashString = !Is.Desktop ? JSON.stringify(flashObject)
@@ -488,8 +557,8 @@ async function saveFlashObjectOrThrow(backupType: 'full' | 'auto-before-restore'
 //         try {
 //           // start the JSON object
 //           controller.enqueue(encoder.encode('{\n'));
-//           controller.enqueue(encoder.encode(`  "_t": "agi.flash-backup",\n`));
-//           controller.enqueue(encoder.encode(`  "_v": ${BACKUP_FORMAT_VERSION_NUMBER},\n`));
+//           controller.enqueue(encoder.encode(`  "schema": "vnd.agi.flash-backup",\n`));
+//           controller.enqueue(encoder.encode(`  "schemaVersion": ${BACKUP_FORMAT_VERSION_NUMBER},\n`));
 //           controller.enqueue(encoder.encode(`  "metadata": ${JSON.stringify({
 //             version: BACKUP_FORMAT_VERSION,
 //             timestamp: new Date().toISOString(),
@@ -557,10 +626,10 @@ async function saveFlashObjectOrThrow(backupType: 'full' | 'auto-before-restore'
 //   });
 // }
 
-async function createFlashObject(backupType: 'full' | 'auto-before-restore', ignoreExclusions: boolean): Promise<DFlashSchema> {
+async function createFlashObject(backupType: 'full' | 'auto-before-restore', ignoreExclusions: boolean, includeSettings: boolean): Promise<DFlashSchema> {
   return {
-    _t: 'agi.flash-backup',
-    _v: BACKUP_FORMAT_VERSION_NUMBER,
+    schema: 'vnd.agi.flash-backup',
+    schemaVersion: BACKUP_FORMAT_VERSION_NUMBER,
     metadata: {
       version: BACKUP_FORMAT_VERSION,
       timestamp: new Date().toISOString(),
@@ -568,7 +637,7 @@ async function createFlashObject(backupType: 'full' | 'auto-before-restore', ign
       backupType,
     },
     storage: {
-      localStorage: await getAllLocalStorageKeyValues(),
+      localStorage: includeSettings ? await getAllLocalStorageKeyValues() : {},
       indexedDB: await getAllIndexedDBData(ignoreExclusions),
     },
   };
@@ -585,10 +654,14 @@ export function FlashRestore(props: { unlockRestore?: boolean }) {
   const [restoreState, setRestoreState] = React.useState<'idle' | 'processing' | 'confirm' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [backupDataForRestore, setBackupDataForRestore] = React.useState<DFlashSchema | null>(null);
+  const [restoreLocalStorageEnabled, setRestoreLocalStorageEnabled] = React.useState(false);
+  const [restoreIndexedDBEnabled, setRestoreIndexedDBEnabled] = React.useState(false);
 
   // derived state
   const isUnlocked = !!props.unlockRestore;
   const isBusy = restoreState === 'processing';
+  const hasLocalStorageData = backupDataForRestore ? Object.keys(backupDataForRestore.storage.localStorage).length > 0 : false;
+  const hasIndexedDBData = backupDataForRestore ? Object.keys(backupDataForRestore.storage.indexedDB).length > 0 : false;
 
 
   // handlers
@@ -634,6 +707,9 @@ export function FlashRestore(props: { unlockRestore?: boolean }) {
       // load data purely into state, and ready for confirmation
       setBackupDataForRestore(data);
       setRestoreState('confirm');
+      // Reset checkboxes to OFF by default for safety
+      setRestoreLocalStorageEnabled(false);
+      setRestoreIndexedDBEnabled(false);
     } catch (error: any) {
       logger.error('Restore preparation failed:', error);
       setRestoreState('error');
@@ -665,11 +741,20 @@ export function FlashRestore(props: { unlockRestore?: boolean }) {
       //   // non-fatal, proceed with restore
       // }
 
-      // 2. Restore data (localStorage first, then IndexedDB)
-      await restoreLocalStorage(backupDataForRestore.storage.localStorage);
-      logger.info('localStorage restore complete');
-      await restoreIndexedDB(backupDataForRestore.storage.indexedDB);
-      logger.info('indexedDB restore complete');
+      // 2. Restore data based on user selections
+      if (restoreLocalStorageEnabled) {
+        await restoreLocalStorage(backupDataForRestore.storage.localStorage);
+        logger.info('localStorage restore complete');
+      }
+      if (restoreIndexedDBEnabled) {
+        await restoreIndexedDB(backupDataForRestore.storage.indexedDB);
+        logger.info('indexedDB restore complete');
+      }
+
+      // Check if nothing was selected
+      if (!restoreLocalStorageEnabled && !restoreIndexedDBEnabled)
+        throw new Error('No data was selected for restore. Please select at least one option.');
+
       setRestoreState('success');
 
       // 3. Alert and reload
@@ -685,7 +770,7 @@ export function FlashRestore(props: { unlockRestore?: boolean }) {
     } finally {
       setBackupDataForRestore(null);
     }
-  }, [backupDataForRestore]);
+  }, [backupDataForRestore, restoreIndexedDBEnabled, restoreLocalStorageEnabled]);
 
   const handleCancelRestore = React.useCallback(() => {
     setRestoreState('idle');
@@ -757,12 +842,55 @@ export function FlashRestore(props: { unlockRestore?: boolean }) {
           Setting Groups: {Object.keys(backupDataForRestore.storage.localStorage).length}<br />
         </Box>
       )}
+      <Box sx={{ mt: 2 }}>
+        <Typography level='body-sm' sx={{ mb: 1 }} color={!restoreLocalStorageEnabled && !restoreIndexedDBEnabled ? 'danger' : undefined}>
+          Select what to restore:
+        </Typography>
+        <Sheet variant='soft' sx={{ p: 2, borderRadius: 'md', border: '1px solid', borderColor: 'neutral.outlinedBorder', display: 'flex', flexDirection: { xs: 'column', sm: 'row' }, gap: 2 }}>
+          <FormControl orientation='horizontal' sx={{ gap: 1, flex: 1 }}>
+            <Checkbox
+              size='md'
+              color='neutral'
+              checked={restoreLocalStorageEnabled}
+              disabled={!hasLocalStorageData}
+              onChange={(event) => setRestoreLocalStorageEnabled(event.target.checked)}
+            />
+            <FormLabel sx={{ fontWeight: 'sm', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', opacity: hasLocalStorageData ? 1 : 0.5 }}>
+              App Settings
+              <Typography level='body-xs' sx={{ fontWeight: 'normal', color: 'text.secondary' }}>
+                {hasLocalStorageData ? '(preferences, models)' : '(not in backup file)'}
+              </Typography>
+            </FormLabel>
+          </FormControl>
+          <FormControl orientation='horizontal' sx={{ gap: 1, flex: 1 }}>
+            <Checkbox
+              size='md'
+              color='neutral'
+              checked={restoreIndexedDBEnabled}
+              disabled={!hasIndexedDBData}
+              onChange={(event) => setRestoreIndexedDBEnabled(event.target.checked)}
+            />
+            <FormLabel sx={{ fontWeight: 'sm', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', opacity: hasIndexedDBData ? 1 : 0.5 }}>
+              Conversations
+              <Typography level='body-xs' sx={{ fontWeight: 'normal', color: 'text.secondary' }}>
+                {hasIndexedDBData ? '(chats, attachments)' : '(not in backup file)'}
+              </Typography>
+            </FormLabel>
+          </FormControl>
+        </Sheet>
+      </Box>
       <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end', pt: 2 }}>
         <Button variant='plain' color='neutral' onClick={handleCancelRestore}>
           Cancel
         </Button>
-        <Button variant='solid' color='danger' onClick={handleRestoreFlashConfirmed} loading={restoreState === 'processing'}>
-          Replace & Reset All Data
+        <Button
+          variant='solid'
+          color='danger'
+          onClick={handleRestoreFlashConfirmed}
+          loading={restoreState === 'processing'}
+          disabled={!restoreLocalStorageEnabled && !restoreIndexedDBEnabled}
+        >
+          Replace Selected Data
         </Button>
       </Box>
     </GoodModal>
@@ -777,6 +905,7 @@ export function FlashBackup(props: {
 
   // state
   const [includeImages, setIncludeImages] = React.useState(false);
+  const [includeSettings, setIncludeSettings] = React.useState(true);
   const [backupState, setBackupState] = React.useState<'idle' | 'processing' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
@@ -796,7 +925,8 @@ export function FlashBackup(props: {
         'full',
         event.ctrlKey, // control forces a traditional browser download - default: fileSave
         includeImages,
-        `Big-AGI-flash${includeImages ? '+images' : ''}${event.ctrlKey ? '-download' : ''}-${dateStr}.json`,
+        includeSettings,
+        `Big-AGI-flash${includeImages ? '+images' : ''}${includeSettings ? '' : '-nosets'}${event.ctrlKey ? '-download' : ''}-${dateStr}.json`,
       );
       setBackupState(success ? 'success' : 'idle');
     } catch (error: any) {
@@ -809,7 +939,7 @@ export function FlashBackup(props: {
         setErrorMessage(`Backup failed: ${_getErrorText(error)}`);
       }
     }
-  }, [includeImages, onStartedBackup]);
+  }, [includeImages, includeSettings, onStartedBackup]);
 
 
   return <>
@@ -835,6 +965,10 @@ export function FlashBackup(props: {
       {backupState === 'success' ? 'Backup Saved' : backupState === 'error' ? 'Backup Failed' : isProcessing ? 'Backing Up...' : 'Export All'}
     </Button>
     {!errorMessage && <>
+      <FormControl orientation='horizontal' sx={{ justifyContent: 'space-between', alignItems: 'center', ml: 2, mr: 1.25, mt: 0.25 }}>
+        <FormLabel sx={{ fontWeight: 'md' }}>Include Models & Settings</FormLabel>
+        <Switch size='sm' checked={includeSettings} onChange={(event) => setIncludeSettings(event.target.checked)} />
+      </FormControl>
       <FormControl orientation='horizontal' sx={{ justifyContent: 'space-between', alignItems: 'center', ml: 2, mr: 1.25, mt: 0.25 }}>
         <FormLabel sx={{ fontWeight: 'md' }}>Include Binary Images</FormLabel>
         <Switch size='sm' color={includeImages ? 'danger' : undefined} checked={includeImages} onChange={(event) => setIncludeImages(event.target.checked)} />

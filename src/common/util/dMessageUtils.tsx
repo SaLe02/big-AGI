@@ -4,7 +4,6 @@ import TimeAgo from 'react-timeago';
 import type { SxProps } from '@mui/joy/styles/types';
 import { Avatar, Box } from '@mui/joy';
 import Face6Icon from '@mui/icons-material/Face6';
-import FormatPaintOutlinedIcon from '@mui/icons-material/FormatPaintOutlined';
 import NotificationsActiveIcon from '@mui/icons-material/NotificationsActiveOutlined';
 import SettingsSuggestIcon from '@mui/icons-material/SettingsSuggest';
 import SmartToyOutlinedIcon from '@mui/icons-material/SmartToyOutlined';
@@ -12,11 +11,12 @@ import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined
 
 import { SystemPurposeId, SystemPurposes } from '../../data';
 
-import { findModelVendor } from '~/modules/llms/vendors/vendors.registry';
+import { llmsGetVendorIcon } from '~/modules/llms/components/LLMVendorIcon';
 
 import type { MetricsChatGenerateCost_Md } from '~/common/stores/metrics/metrics.chatgenerate';
 import type { DMessage, DMessageGenerator, DMessageRole } from '~/common/stores/chat/chat.message';
 import type { UIComplexityMode } from '~/common/app.theme';
+import { PhPaintBrush } from '~/common/components/icons/phosphor/PhPaintBrush';
 import { animationColorRainbow } from '~/common/util/animUtils';
 import { formatModelsCost } from '~/common/util/costUtils';
 
@@ -74,15 +74,18 @@ const tooltipMetricsGridSx: SxProps = {
   // grid of 2 columns, the first fits the labels, the other expends with the values
   display: 'grid',
   gridTemplateColumns: 'auto 1fr',
-  gap: 0.5,
+  columnGap: 1,
+  rowGap: 0.5,
 };
 
 
 /** Whole message background color, based on the message role and state */
-export function messageBackground(messageRole: DMessageRole | string, wasEdited: boolean, isAssistantIssue: boolean): string {
+export function messageBackground(messageRole: DMessageRole | string, userCommand: 'draw' | 'react' | false, wasEdited: boolean, isAssistantIssue: boolean): string {
   switch (messageRole) {
     case 'user':
-      return 'primary.plainHoverBg'; // was .background.level1
+      return userCommand === 'draw' ? 'warning.softActiveBg'
+        : userCommand === 'react' ? 'success.softHoverBg'
+          : 'primary.plainHoverBg'; // was .background.level1
     case 'assistant':
       return isAssistantIssue ? 'danger.softBg' : 'background.surface';
     case 'system':
@@ -127,7 +130,10 @@ export function makeMessageAvatarIcon(
 
     case 'assistant':
       const isDownload = messageGeneratorName === 'web';
-      const isTextToImage = messageGeneratorName === 'DALL·E' || messageGeneratorName === 'Prodia';
+      const isTextToImage =
+        messageGeneratorName?.startsWith('GPT Image') // sync this with t2i.client.ts
+        || messageGeneratorName?.startsWith('DALL·E')
+        || messageGeneratorName === 'Prodia';
       const isReact = messageGeneratorName?.startsWith('react-');
 
       // Extra appearance
@@ -159,7 +165,7 @@ export function makeMessageAvatarIcon(
 
       // mode: text-to-image
       if (isTextToImage)
-        return <FormatPaintOutlinedIcon sx={!messageIncomplete ? avatarIconSx : {
+        return <PhPaintBrush sx={!messageIncomplete ? avatarIconSx : {
           ...avatarIconSx,
           animation: `${animationColorRainbow} 1s linear infinite`,
         }} />;
@@ -241,7 +247,7 @@ export function useMessageAvatarLabel(
     // aix generator: details galore
     const modelId = generator.aix?.mId ?? null;
     const vendorId = generator.aix?.vId ?? null;
-    const VendorIcon = (vendorId && complexity !== 'minimal') ? findModelVendor(vendorId)?.Icon : null;
+    const VendorIcon = (vendorId && complexity !== 'minimal') ? llmsGetVendorIcon(vendorId) : null;
     const metrics = generator.metrics ? _prettyMetrics(generator.metrics, complexity) : null;
     const stopReason = generator.tokenStopReason ? _prettyTokenStopReason(generator.tokenStopReason, complexity) : null;
 
@@ -266,6 +272,7 @@ function _prettyMetrics(metrics: DMessageGenerator['metrics'], uiComplexityMode:
 
   const showWaitingTime = metrics?.dtStart !== undefined && (uiComplexityMode === 'extra' || metrics.dtStart >= 10000);
   const showSpeedSection = uiComplexityMode !== 'minimal' && (showWaitingTime || metrics?.vTOutInner !== undefined);
+  const showTimeSection = showSpeedSection && !!metrics?.dtAll;
 
   const costCode = metrics.$code ? _prettyCostCode(metrics.$code) : null;
 
@@ -304,8 +311,12 @@ function _prettyMetrics(metrics: DMessageGenerator['metrics'], uiComplexityMode:
         })</small>
       </>}
     </div>}
-    {costCode && metrics?.$c !== undefined ? <div>Costs:</div> : <div />}
+    {costCode && <div>{metrics?.$c !== undefined ? 'Costs:' : ''}</div>}
     {costCode && <div><em>{costCode}</em></div>}
+
+    {/* Time */}
+    {showTimeSection && <div>Time:</div>}
+    {showTimeSection && <div><b>{(Math.round(metrics.dtAll! / 100) / 10).toLocaleString()}</b> s</div>}
   </Box>;
 }
 
@@ -340,7 +351,7 @@ function _prettyTokenStopReason(reason: DMessageGenerator['tokenStopReason'], co
 }
 
 
-const oaiORegex = /gpt-[345](?:o|\.\d+)?-|o[1345]-|chatgpt-4o|computer-use-/;
+const oaiORegex = /gpt-[345](?:o|\.\d+)?-|o[1345]-|chatgpt-[45]o?|gpt-5-chat|computer-use-/;
 const geminiRegex = /gemini-|gemma-|learnlm-/;
 
 
@@ -359,6 +370,7 @@ export function prettyShortChatModelName(model: string | undefined): string {
     if (versionIndex !== -1) cutModel = cutModel.slice(0, versionIndex);
     return cutModel
       .replace('chatgpt-', 'ChatGPT_')
+      .replace('gpt-5-chat-', 'ChatGPT-5 ')
       .replace('gpt-', 'GPT_')
       // feature variants
       .replace('-audio', ' Audio')
@@ -469,14 +481,28 @@ export function prettyShortChatModelName(model: string | undefined): string {
 }
 
 function _prettyAnthropicModelName(modelId: string): string | null {
-  const claudeIndex = modelId.indexOf('claude-3');
-  if (claudeIndex === -1) return null;
+  if (modelId.indexOf('claude-') === -1) return null; // not a Claude model
+
+  // must match any known prefix
+  let claudeIndex = -1;
+  const claudePrefixes = ['claude-opus-4', 'claude-sonnet-4', 'claude-haiku-4', 'claude-3', 'claude-2'];
+  for (const prefix of claudePrefixes) {
+    const index = modelId.indexOf(prefix);
+    if (index !== -1) {
+      claudeIndex = index;
+      break;
+    }
+  }
 
   const subStr = modelId.slice(claudeIndex);
   const version =
-    subStr.includes('-3-7-') ? '3.7'
-      : subStr.includes('-3-5-') ? '3.5'
-        : '3';
+    subStr.includes('-3-5') ? '3.5' // fixes the -5
+      : subStr.includes('-5') ? '5'
+        : subStr.includes('-4-1') ? '4.1'
+          : subStr.includes('-4') ? '4'
+            : subStr.includes('-3-7') ? '3.7'
+              : subStr.includes('-3') ? '3'
+                : '?';
 
   if (subStr.includes(`-opus`)) return `Claude ${version} Opus`;
   if (subStr.includes(`-sonnet`)) return `Claude ${version} Sonnet`;

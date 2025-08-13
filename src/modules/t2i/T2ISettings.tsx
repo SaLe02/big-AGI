@@ -28,7 +28,7 @@ export function T2ISettings() {
         disabled: !provider.configured,
       });
     });
-    return options;
+    return options.toReversed();
   }, [providers]);
 
 
@@ -38,7 +38,7 @@ export function T2ISettings() {
 
       <Alert variant='soft'>
         There are no configured services for text-to-image generation.
-        Please configure one service, such as an OpenAI LLM service, or the Prodia service below.
+        Please configure one service, such as an OpenAI LLM service, below.
       </Alert>
 
     ) : (
